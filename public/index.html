@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Confidential Ranked-Choice Voting — Tari Ootle</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Confidential Ranked-Choice Voting</h1>
+      <p class="sub">Tari Ootle · stealth ballots · trustless IRV tally</p>
+    </div>
+    <div class="statusbar" id="statusbar">
+      <span class="pill" id="pill-network">network …</span>
+      <span class="pill" id="pill-epoch">epoch …</span>
+      <span class="pill" id="pill-template" title="template address">template …</span>
+      <button id="btn-faucet" class="ghost" hidden>Faucet</button>
+    </div>
+  </header>
+
+  <main>
+    <section class="elections-bar">
+      <label for="election-select">Load election</label>
+      <select id="election-select"><option value="">— none —</option></select>
+      <button id="btn-refresh-list" class="ghost">Refresh</button>
+    </section>
+
+    <!-- Step 1: settings -->
+    <details class="step" id="step-settings" open>
+      <summary><span class="step-num">1</span> Election settings</summary>
+      <div class="step-body">
+        <div class="field">
+          <label for="in-title">Title</label>
+          <input id="in-title" type="text" placeholder="e.g. Council election 2026" maxlength="200" />
+        </div>
+        <div class="field">
+          <label for="in-method">Voting method (tally)</label>
+          <select id="in-method">
+            <option value="irv">IRV — single winner, instant-runoff</option>
+            <option value="sequential-irv" selected>Sequential IRV — multi-winner, repeat IRV</option>
+            <option value="stv">STV — multi-winner, proportional (Droop quota)</option>
+          </select>
+          <p class="hint">Pinned at election creation — the tally method cannot be changed afterwards.</p>
+        </div>
+        <div class="field">
+          <label for="in-winners">Number of winners</label>
+          <input id="in-winners" type="number" min="1" max="50" value="1" />
+          <p class="hint" id="hint-winners">With one winner the tally is single-winner IRV regardless of method.</p>
+        </div>
+        <div class="field">
+          <label>Candidates</label>
+          <ul id="candidate-list" class="candidate-list"></ul>
+          <div class="row">
+            <input id="in-candidate" type="text" placeholder="Candidate name" />
+            <button id="btn-add-candidate" class="ghost">Add</button>
+          </div>
+        </div>
+        <div class="field">
+          <label for="in-epochs">Voting period (epochs from now)</label>
+          <input id="in-epochs" type="number" min="1" max="100000" value="720" />
+          <p class="hint">Current epoch: <span id="epoch-now">…</span> — after the deadline anyone can finalize the tally.</p>
+        </div>
+      </div>
+    </details>
+
+    <!-- Step 2: voters -->
+    <details class="step" id="step-voters">
+      <summary><span class="step-num">2</span> Voters</summary>
+      <div class="step-body">
+        <div class="field">
+          <label for="in-voters">Voter addresses (one per line)</label>
+          <textarea id="in-voters" rows="8" spellcheck="false"
+            placeholder="otl_esm_1…&#10;otl_esm_1…&#10;otl_esm_1…"></textarea>
+          <p class="hint">Each address receives exactly one stealth ballot token at initiation. Voters spend it from their own wallet — this site never touches voter keys.</p>
+        </div>
+        <div class="row">
+          <button id="btn-csv" class="ghost">Import CSV …</button>
+          <span class="voter-count" id="voter-count">0 voters</span>
+        </div>
+      </div>
+    </details>
+
+    <!-- Step 3: initiate -->
+    <details class="step" id="step-initiate">
+      <summary><span class="step-num">3</span> Review &amp; initiate</summary>
+      <div class="step-body">
+        <table class="summary" id="init-summary"></table>
+        <button id="btn-initiate" class="primary">Initiate election</button>
+        <div id="init-progress" class="progress" hidden></div>
+        <div id="init-result" hidden>
+          <h3>Election live</h3>
+          <div class="kv">
+            <div><span>Component</span><code id="res-component"></code></div>
+            <div><span>Ballot resource</span><code id="res-resource"></code></div>
+            <div><span>Transaction</span><code id="res-txid"></code></div>
+          </div>
+          <h3>Ballot tokens (per voter)</h3>
+          <p class="hint">Give each voter their row — they need the commitment and nonce to spend their token from their own wallet client.</p>
+          <table class="ballots" id="ballot-table"></table>
+          <button id="btn-ballots-csv" class="ghost">Download ballots CSV</button>
+        </div>
+      </div>
+    </details>
+
+    <!-- Step 4: monitor -->
+    <details class="step" id="step-monitor">
+      <summary><span class="step-num">4</span> Monitor &amp; results</summary>
+      <div class="step-body">
+        <div id="monitor-empty" class="empty">No election loaded. Initiate one above, or load one from the list.</div>
+        <div id="monitor" hidden>
+          <div class="status-cards">
+            <div class="card"><span class="card-label">Status</span><span class="card-value" id="m-status">…</span></div>
+            <div class="card"><span class="card-label">Epoch</span><span class="card-value" id="m-epoch">…</span></div>
+            <div class="card"><span class="card-label">Deadline</span><span class="card-value" id="m-deadline">…</span></div>
+            <div class="card"><span class="card-label">Ballots cast</span><span class="card-value" id="m-cast">…</span></div>
+            <div class="card"><span class="card-label">Eligible voters</span><span class="card-value" id="m-voters">…</span></div>
+            <div class="card"><span class="card-label">Vault balance</span><span class="card-value" id="m-vault">…</span></div>
+          </div>
+          <div class="row">
+            <button id="btn-refresh" class="ghost">Refresh</button>
+            <button id="btn-end" class="primary">End vote</button>
+            <button id="btn-end-expired" class="ghost">Finalize (expired)</button>
+            <label class="auto"><input type="checkbox" id="in-autopoll" checked /> auto-refresh</label>
+          </div>
+          <div id="m-progress" class="progress" hidden></div>
+          <div id="m-error" class="error" hidden></div>
+          <h3>Results</h3>
+          <div id="m-results"><span class="hint">No results yet — tally is shown once the vote ends.</span></div>
+          <details id="m-raw">
+            <summary>Raw result JSON</summary>
+            <pre id="m-raw-pre"></pre>
+          </details>
+        </div>
+      </div>
+    </details>
+  </main>
+
+  <!-- terminal log -->
+  <details class="term" id="term">
+    <summary>Terminal log <span class="badge" id="log-badge">0</span></summary>
+    <div class="term-head">
+      <button id="btn-log-copy" class="ghost">Copy</button>
+      <button id="btn-log-clear" class="ghost">Clear</button>
+    </div>
+    <pre id="log" class="log"></pre>
+  </details>
+
+  <!-- CSV modal -->
+  <dialog id="csv-dialog">
+    <form method="dialog" class="csv-form">
+      <h3>Import voters from CSV</h3>
+      <p class="hint">First column: voter address. Optional second column: label (ignored). Header row is skipped if present.</p>
+      <textarea id="csv-text" rows="8" spellcheck="false"
+        placeholder="address,label&#10;otl_esm_1…,Alice&#10;otl_esm_1…,Bob"></textarea>
+      <div class="row">
+        <label class="file-btn">Choose file<input type="file" id="csv-file" accept=".csv,.txt,text/csv" hidden /></label>
+        <button id="csv-apply" class="primary" value="default">Add voters</button>
+        <button value="cancel" class="ghost">Cancel</button>
+      </div>
+      <p class="csv-status" id="csv-status"></p>
+    </form>
+  </dialog>
+
+  <footer>
+    <p>Everything runs on-chain on the Esmeralda testnet. Voter identity is hidden by stealth ballots; ballot contents and the tally are public.</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>

@@ -1,0 +1,21 @@
+{
+  "name": "confidential-rcv-web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Web front end for the confidential ranked-choice voting template on Tari Ootle",
+  "scripts": {
+    "start": "node server.mjs",
+    "postinstall": "node scripts/patch-packages.mjs"
+  },
+  "dependencies": {
+    "@noble/hashes": "^2.4.0",
+    "@tari-project/indexer-client": "^1.6.0",
+    "@tari-project/ootle": "^0.4.0",
+    "@tari-project/ootle-ts-bindings": "^1.50.1",
+    "@tari-project/ootle-wasm": "^0.40.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
