@@ -66,11 +66,52 @@ async function refreshStatus() {
     $('pill-template').classList.toggle('ok', !!s.templateAddress);
     $('pill-template').title = s.templateAddress || '';
     $('btn-faucet').hidden = false;
-    $('epoch-now').textContent = s.epoch;
+    updateDeadlinePreview();
   } catch (e) {
     log(`status failed: ${e.message}`, 'err');
   }
 }
+
+// ---------- voting deadline (UTC) ----------
+function utcNowIso() {
+  return new Date().toISOString();
+}
+
+function toUtcIso(datetimeLocalValue) {
+  if (!datetimeLocalValue) return null;
+  const t = new Date(datetimeLocalValue + ':00Z');
+  return Number.isNaN(t.getTime()) ? null : t.toISOString();
+}
+
+function setDefaultDeadline() {
+  const d = new Date(Date.now() + 7 * 24 * 3600 * 1000);
+  const pad = (n) => String(n).padStart(2, '0');
+  $('in-end-utc').value = `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}T${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}`;
+  updateDeadlinePreview();
+}
+
+function updateDeadlinePreview() {
+  const el = $('end-preview');
+  const s = state.status;
+  const iso = toUtcIso($('in-end-utc').value);
+  if (!iso || !s) {
+    el.textContent = 'choose a date and time (UTC)';
+    return;
+  }
+  const target = Date.parse(iso);
+  const durationSecs = s.epochDurationSecs || 1200;
+  const diffEpochs = Math.max(0, Math.ceil((target - Date.now()) / 1000 / durationSecs));
+  const diffDays = ((target - Date.now()) / (24 * 3600 * 1000)).toFixed(1);
+  if (target <= Date.now()) {
+    el.textContent = 'that time is in the past — pick a future deadline';
+    return;
+  }
+  const epoch = s.epoch + diffEpochs;
+  const dateStr = new Date(target).toUTCString().replace('GMT', 'UTC');
+  el.textContent = `closes at epoch ${epoch} — ${dateStr} (~${diffDays} days from now)`;
+}
+
+$('in-end-utc').addEventListener('input', updateDeadlinePreview);
 
 $('btn-faucet').addEventListener('click', async () => {
   $('btn-faucet').disabled = true;
@@ -206,7 +247,7 @@ function renderSummary() {
     ['Winners', $('in-winners').value],
     ['Candidates', state.candidates.length ? state.candidates.map((c, i) => `#${i} ${c}`).join('<br>') : '—'],
     ['Voters', `${state.voters.length} address(es)`],
-    ['Voting period', `${$('in-epochs').value} epochs`],
+    ['Voting deadline (UTC)', deadlineSummary()],
   ];
   rows[0][1] = $('in-title').value || '(untitled)';
   for (const [k, v] of rows) {
@@ -214,6 +255,17 @@ function renderSummary() {
     tr.innerHTML = `<td>${k}</td><td>${v}</td>`;
     t.appendChild(tr);
   }
+}
+
+function deadlineSummary() {
+  const iso = toUtcIso($('in-end-utc').value);
+  if (!iso) return '—';
+  const s = state.status;
+  const target = Date.parse(iso);
+  const durationSecs = s?.epochDurationSecs || 1200;
+  const diffEpochs = Math.max(1, Math.ceil((target - Date.now()) / 1000 / durationSecs));
+  const dateStr = new Date(target).toUTCString().replace('GMT', 'UTC');
+  return `${dateStr} → epoch ${(s?.epoch ?? 0) + diffEpochs}`;
 }
 
 function validateSetup() {
@@ -226,9 +278,10 @@ function validateSetup() {
   for (const v of state.voters) {
     if (!/^otl_esm_/.test(v)) throw new Error(`invalid voter address: ${v.slice(0, 20)}…`);
   }
-  const epochs = Number($('in-epochs').value);
-  if (!(epochs >= 1)) throw new Error('voting period must be at least 1 epoch');
-  return { winners, epochs };
+  const endUtc = toUtcIso($('in-end-utc').value);
+  if (!endUtc) throw new Error('choose a voting deadline (UTC)');
+  if (Date.parse(endUtc) <= Date.now()) throw new Error('voting deadline must be in the future');
+  return { winners, endUtc };
 }
 
 $('btn-initiate').addEventListener('click', async () => {
@@ -251,7 +304,7 @@ $('btn-initiate').addEventListener('click', async () => {
       numCandidates: state.candidates.length,
       candidates: state.candidates,
       voters: state.voters,
-      expiresInEpochs: opts.epochs,
+      endUtc: opts.endUtc,
     };
     const e = await api('/api/elections', { method: 'POST', body });
     log(`election created: <code>${e.componentAddress}</code>`);
@@ -353,7 +406,9 @@ function renderMonitor(e) {
   $('m-status').textContent = status;
   $('m-status').style.color = status === 'ended' ? 'var(--accent)' : status === 'error' ? 'var(--err)' : 'var(--fg)';
   $('m-epoch').textContent = e.epoch;
-  $('m-deadline').textContent = e.expiresAtEpoch;
+  $('m-deadline').textContent = e.expiresAtUtc
+    ? new Date(e.expiresAtUtc).toUTCString().replace('GMT', 'UTC')
+    : String(e.expiresAtEpoch);
   $('m-cast').textContent = st.ballotCount ?? '—';
   $('m-voters').textContent = st.voterCount ?? '—';
   $('m-vault').textContent = st.vaultBalance ?? '—';
@@ -441,6 +496,11 @@ function normalizeResult(result) {
   return null;
 }
 
+function candidateName(id) {
+  const c = state.currentElection?.candidates;
+  return c && Number(id) < c.length ? c[Number(id)] : `Candidate ${id}`;
+}
+
 function renderResult(result) {
   const el = $('m-results');
   $('m-raw-pre').textContent = JSON.stringify(result, null, 2);
@@ -450,16 +510,16 @@ function renderResult(result) {
   if (!r) {
     html = '<p class="hint">Unrecognised result shape — see raw JSON below.</p>';
   } else if (r.kind === 'Irv') {
-    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? 'Candidate ' + r.winner : 'no winner'}</p>`;
+    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
     html += '<h4>Rounds</h4>' + roundsTable(r.rounds);
   } else if (r.kind === 'SequentialIrv') {
-    html = `<h4>Winners</h4><p class="winner">${r.winners.length ? r.winners.join(', ') : 'none'}</p>`;
+    html = `<h4>Winners</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
     r.seats.forEach((seat, i) => {
-      html += `<h4>Seat ${i + 1}${seat.winner != null ? ' — winner ' + seat.winner : ''}</h4>`;
+      html += `<h4>Seat ${i + 1}${seat.winner != null ? ' — winner ' + candidateName(seat.winner) : ''}</h4>`;
       html += roundsTable(seat.irv_rounds);
     });
   } else if (r.kind === 'Stv') {
-    html = `<h4>Winners (elected in order)</h4><p class="winner">${r.winners.length ? r.winners.join(', ') : 'none'}</p>`;
+    html = `<h4>Winners (elected in order)</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
     html += stvRoundsTable(r.rounds);
   }
   el.innerHTML = html;
@@ -471,7 +531,7 @@ function roundsTable(rounds) {
   for (const r of rounds) Object.keys(normCounts(r.counts)).forEach((c) => cands.add(Number(c)));
   const order = [...cands].sort((a, b) => a - b);
   let html = '<table class="round-table"><tr><th>Round</th>';
-  for (const c of order) html += `<th>Cand ${c}</th>`;
+  for (const c of order) html += `<th>${candidateName(c)}</th>`;
   html += '<th>Action</th></tr>';
   rounds.forEach((r, i) => {
     const counts = normCounts(r.counts);
@@ -480,7 +540,7 @@ function roundsTable(rounds) {
       html += `<td>${counts[c] ?? '·'}</td>`;
     }
     const final = r.eliminated == null;
-    html += `<td class="${final ? 'winner' : 'elim'}">${final ? 'winner' : `eliminated ${r.eliminated}`}</td></tr>`;
+    html += `<td class="${final ? 'winner' : 'elim'}">${final ? 'winner' : `eliminated ${candidateName(r.eliminated)}`}</td></tr>`;
   });
   return html + '</table>';
 }
@@ -491,15 +551,15 @@ function stvRoundsTable(rounds) {
   for (const r of rounds) Object.keys(normCounts(r.counts)).forEach((c) => cands.add(Number(c)));
   const order = [...cands].sort((a, b) => a - b);
   let html = '<table class="round-table"><tr><th>Round</th>';
-  for (const c of order) html += `<th>Cand ${c}</th>`;
+  for (const c of order) html += `<th>${candidateName(c)}</th>`;
   html += '<th>Action</th></tr>';
   rounds.forEach((r, i) => {
     const counts = normCounts(r.counts);
     html += `<tr><td>${i + 1}</td>`;
     for (const c of order) html += `<td>${counts[c] ?? '·'}</td>`;
     const acts = [];
-    if (r.elected?.length) acts.push(`elected ${r.elected.join(',')}`);
-    if (r.eliminated != null) acts.push(`eliminated ${r.eliminated}`);
+    if (r.elected?.length) acts.push(`elected ${r.elected.map(candidateName).join(', ')}`);
+    if (r.eliminated != null) acts.push(`eliminated ${candidateName(r.eliminated)}`);
     if (!acts.length) acts.push('—');
     html += `<td>${acts.join('; ')}</td></tr>`;
   });
@@ -571,6 +631,7 @@ document.querySelectorAll('.step summary').forEach((s) => {
 });
 
 // ---------- init ----------
+setDefaultDeadline();
 refreshStatus();
 setInterval(refreshStatus, 30000);
 renderCandidates();

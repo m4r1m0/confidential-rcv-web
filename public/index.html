@@ -58,9 +58,10 @@
           </div>
         </div>
         <div class="field">
-          <label for="in-epochs">Voting period (epochs from now)</label>
-          <input id="in-epochs" type="number" min="1" max="100000" value="720" />
-          <p class="hint">Current epoch: <span id="epoch-now">…</span> — after the deadline anyone can finalize the tally.</p>
+          <label for="in-end-utc">Voting deadline (UTC)</label>
+          <input id="in-end-utc" type="datetime-local" />
+          <p class="hint">Times are UTC — the vote closes at the first epoch boundary at or after this time (~20–30 min per epoch, approximate).</p>
+          <p class="hint" id="end-preview">…</p>
         </div>
       </div>
     </details>

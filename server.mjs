@@ -49,6 +49,23 @@ function loadConfig() {
 const cfg = loadConfig();
 const ctx = makeContext(cfg);
 
+// Approximate epoch length in seconds. Esmeralda epochs are ~20-30 min; the value is
+// configurable via EPOCH_DURATION_SECS and only used to translate between wall-clock
+// time and epoch numbers (the on-chain deadline is always the epoch).
+const EPOCH_DURATION_SECS = Number(cfg.EPOCH_DURATION_SECS || 1200);
+
+function epochToUtc(epoch, currentEpoch) {
+  const secs = (epoch - currentEpoch) * EPOCH_DURATION_SECS;
+  return new Date(Date.now() + secs * 1000).toISOString();
+}
+
+function utcToEpochDelta(utcIso, currentEpoch) {
+  const target = Date.parse(utcIso);
+  if (Number.isNaN(target)) throw new Error('invalid endUtc date');
+  const diffSecs = (target - Date.now()) / 1000;
+  return Math.ceil(diffSecs / EPOCH_DURATION_SECS);
+}
+
 // --- persistence ---
 function loadElections() {
   if (!existsSync(DATA_FILE)) return [];
@@ -80,6 +97,7 @@ function publicElection(e) {
     candidates: e.candidates,
     voters: e.voters,
     expiresAtEpoch: e.expiresAtEpoch,
+    expiresAtUtc: e.expiresAtUtc ?? null,
     status: e.status,
     txId: e.txId,
   };
@@ -140,6 +158,7 @@ const server = createServer(async (req, res) => {
         templateAddress: cfg.TEMPLATE_ADDRESS || null,
         walletAccount: ctx.account,
         walletAddress: ctx.signer.address,
+        epochDurationSecs: EPOCH_DURATION_SECS,
         elections: elections.length,
       });
     }
@@ -161,7 +180,14 @@ const server = createServer(async (req, res) => {
       const voterAddresses = (Array.isArray(body.voters) ? body.voters : [])
         .map((v) => String(v).trim())
         .filter((v) => /^otl_esm_/.test(v));
-      const expiresInEpochs = Math.max(1, Math.floor(Number(body.expiresInEpochs) || 100));
+      const epoch = await currentEpoch(ctx);
+      let expiresInEpochs;
+      if (body.endUtc) {
+        expiresInEpochs = Math.max(1, Math.min(100_000, utcToEpochDelta(body.endUtc, epoch)));
+      } else {
+        expiresInEpochs = Math.max(1, Math.min(100_000, Math.floor(Number(body.expiresInEpochs) || 100)));
+      }
+      const expiresAtEpoch = epoch + expiresInEpochs;
 
       if (!cfg.TEMPLATE_ADDRESS) throw new Error('TEMPLATE_ADDRESS not configured');
       if (numCandidates < 2) throw new Error('at least 2 candidates required');
@@ -170,9 +196,6 @@ const server = createServer(async (req, res) => {
       if (voterAddresses.length !== (Array.isArray(body.voters) ? body.voters.length : 0)) {
         throw new Error('invalid voter addresses (must be otl_esm_... ootle addresses)');
       }
-
-      const epoch = await currentEpoch(ctx);
-      const expiresAtEpoch = epoch + expiresInEpochs;
 
       const initiated = await initiateElection(ctx, cfg, {
         voterAddresses,
@@ -200,6 +223,7 @@ const server = createServer(async (req, res) => {
         })),
         expiresAtEpoch,
         expiresInEpochs,
+        expiresAtUtc: epochToUtc(expiresAtEpoch, epoch),
         status: 'open',
         txId: initiated.txId,
         events: initiated.events,
@@ -220,13 +244,14 @@ const server = createServer(async (req, res) => {
       const e = elections.find((x) => x.id === oneMatch[1]);
       if (!e) return sendJson(res, 404, { error: 'not found' });
       const epoch = await currentEpoch(ctx);
+      const fresh = { ...publicElection(e), expiresAtUtc: epochToUtc(e.expiresAtEpoch, epoch) };
       let state = null;
       try {
         state = await readElectionState(ctx, e.componentAddress);
       } catch (err) {
         state = { error: String(err.message || err) };
       }
-      return sendJson(res, 200, { ...publicElection(e), epoch, state });
+      return sendJson(res, 200, { ...fresh, epoch, state });
     }
 
     // end vote

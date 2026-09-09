@@ -8,8 +8,9 @@ Node backend.
 ## What it does
 
 - **Create an election** — pick the tally method (IRV, Sequential IRV or STV),
-  set candidates/winners, add voters by address (or bulk-import a CSV), and
-  initiate on-chain. One stealth ballot token (amount-1) is minted per voter.
+  set candidates/winners and a **voting deadline by calendar date/time (UTC)**,
+  add voters by address (or bulk-import a CSV), and initiate on-chain. One
+  stealth ballot token (amount-1) is minted per voter.
 - **Show each voter their ballot** — the per-voter UTXO commitment + sender
   nonce needed to spend the token from their own wallet client.
 - **Monitor & results** — live ballot count / voter count / deadline, end the
@@ -68,6 +69,10 @@ The server generates a fresh initiator wallet on first start (writes
 `config.env`) and prints the account. Fund it with the **Faucet** button in the
 page header (creates the account and claims testnet funds in one transaction).
 
+`EPOCH_DURATION_SECS` (default 1200) converts the calendar deadline to an epoch
+number. Esmeralda epochs are ~20-30 minutes, so the conversion is approximate:
+the vote closes at the first epoch boundary at or after the chosen time.
+
 ### Publishing the template
 
 Publish the ranked-voting WASM through the wallet web UI, then set
@@ -107,7 +112,7 @@ one-time stealth key — the transaction cannot be linked to the voter.
 |---|---|
 | `GET /api/status` | Network, epoch, template, initiator account |
 | `POST /api/setup` | Create initiator account + faucet (idempotent) |
-| `POST /api/elections` | Create + initiate an election |
+| `POST /api/elections` | Create + initiate an election (`endUtc` ISO deadline or `expiresInEpochs`) |
 | `GET /api/elections` | List elections |
 | `GET /api/elections/:id` | Election record + live chain state |
 | `POST /api/elections/:id/end` | End the vote (initiator) |
