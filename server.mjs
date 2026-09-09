@@ -132,7 +132,10 @@ function readBody(req) {
 async function serveStatic(req, res, rel) {
   try {
     const data = await readFile(path.join(PUBLIC_DIR, rel));
-    res.writeHead(200, { 'Content-Type': MIME[path.extname(rel)] || 'text/plain' });
+    res.writeHead(200, {
+      'Content-Type': MIME[path.extname(rel)] || 'text/plain',
+      'Cache-Control': 'no-cache',
+    });
     res.end(data);
   } catch {
     sendJson(res, 404, { error: 'not found' });
@@ -144,9 +147,9 @@ const server = createServer(async (req, res) => {
   const p = url.pathname;
   try {
     // static
-    if (req.method === 'GET' && (p === '/' || p === '/index.html')) return serveStatic(req, res, 'index.html');
-    if (req.method === 'GET' && p === '/app.js') return serveStatic(req, res, 'app.js');
-    if (req.method === 'GET' && p === '/style.css') return serveStatic(req, res, 'style.css');
+    if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/' || p === '/index.html')) return serveStatic(req, res, 'index.html');
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/app.js') return serveStatic(req, res, 'app.js');
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/style.css') return serveStatic(req, res, 'style.css');
 
     // status
     if (req.method === 'GET' && p === '/api/status') {
