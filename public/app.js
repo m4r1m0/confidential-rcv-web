@@ -511,12 +511,12 @@ function renderResult(result) {
     html = '<p class="hint">Unrecognised result shape — see raw JSON below.</p>';
   } else if (r.kind === 'Irv') {
     html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
-    html += '<h4>Rounds</h4>' + roundsTable(r.rounds);
+    html += '<h4>Rounds</h4>' + roundsTable(r.rounds, r.winner != null);
   } else if (r.kind === 'SequentialIrv') {
     html = `<h4>Winners</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
     r.seats.forEach((seat, i) => {
       html += `<h4>Seat ${i + 1}${seat.winner != null ? ' — winner ' + candidateName(seat.winner) : ''}</h4>`;
-      html += roundsTable(seat.irv_rounds);
+      html += roundsTable(seat.irv_rounds, seat.winner != null);
     });
   } else if (r.kind === 'Stv') {
     html = `<h4>Winners (elected in order)</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
@@ -525,7 +525,7 @@ function renderResult(result) {
   el.innerHTML = html;
 }
 
-function roundsTable(rounds) {
+function roundsTable(rounds, hasWinner = true) {
   if (!rounds.length) return '<p class="hint">no rounds</p>';
   const cands = new Set();
   for (const r of rounds) Object.keys(normCounts(r.counts)).forEach((c) => cands.add(Number(c)));
@@ -540,7 +540,11 @@ function roundsTable(rounds) {
       html += `<td>${counts[c] ?? '·'}</td>`;
     }
     const final = r.eliminated == null;
-    html += `<td class="${final ? 'winner' : 'elim'}">${final ? 'winner' : `eliminated ${candidateName(r.eliminated)}`}</td></tr>`;
+    const action = final
+      ? hasWinner ? 'winner' : 'no winner'
+      : `eliminated ${candidateName(r.eliminated)}`;
+    const cls = final ? (hasWinner ? 'winner' : '') : 'elim';
+    html += `<td class="${cls}">${action}</td></tr>`;
   });
   return html + '</table>';
 }
