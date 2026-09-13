@@ -160,12 +160,22 @@ $('in-candidate').addEventListener('keydown', (e) => {
   }
 });
 
-$('in-method').addEventListener('change', () => {
-  const multi = $('in-method').value !== 'irv';
-  $('hint-winners').textContent = multi
-    ? 'Sequential IRV fills seats by repeating IRV; STV uses proportional transfer with the Droop quota.'
-    : 'With one winner the tally is single-winner IRV regardless of method.';
-});
+function updateMethodHint() {
+  const m = $('in-method').value;
+  if (m === 'fptp') {
+    $('in-winners').value = 1;
+    $('in-winners').disabled = true;
+    $('hint-winners').textContent =
+      'FPTP is single-winner — exactly one winner; only each ballot’s first preference counts, no majority required.';
+  } else {
+    $('in-winners').disabled = false;
+    $('hint-winners').textContent = m === 'irv'
+      ? 'With one winner the tally is single-winner IRV regardless of method.'
+      : 'Sequential IRV fills seats by repeating IRV; STV uses proportional transfer with the Droop quota.';
+  }
+}
+
+$('in-method').addEventListener('change', updateMethodHint);
 
 // ---------- step 2: voters ----------
 function parseVoterText(text) {
@@ -273,6 +283,9 @@ function validateSetup() {
   const winners = Number($('in-winners').value);
   if (winners < 1 || winners > state.candidates.length) {
     throw new Error('winners must be between 1 and the number of candidates');
+  }
+  if ($('in-method').value === 'fptp' && winners !== 1) {
+    throw new Error('FPTP is single-winner (numWinners must be 1)');
   }
   if (state.voters.length < 1) throw new Error('add at least one voter address');
   for (const v of state.voters) {
@@ -420,8 +433,8 @@ function renderMonitor(e) {
   $('btn-end-expired').hidden = e.status === 'ended' || !expired;
   $('btn-end').disabled = e.status === 'ended';
 
-  if (st.result) renderResult(st.result);
-  else if (e.endResult) renderResult(e.endResult);
+  if (st.result) renderResult(st.result, e.resultSchema);
+  else if (e.endResult) renderResult(e.endResult, e.resultSchema);
 }
 
 // The indexer decodes template return values into minicbor-shaped JS values:
@@ -449,7 +462,7 @@ function normRound(round) {
   return { counts: normCounts(round[0]), eliminated: round[1] == null ? null : Number(round[1]) };
 }
 
-function normalizeResult(result) {
+function normalizeResult(result, schema = 'v2') {
   if (!result) return null;
   if (typeof result === 'object' && !Array.isArray(result)) {
     // { Irv: {...} }-style shape (not currently produced by the indexer, kept for robustness)
@@ -464,6 +477,9 @@ function normalizeResult(result) {
   if (Array.isArray(payload) && payload.length === 1 && Array.isArray(payload[0])) {
     payload = payload[0];
   }
+  // Variant indices depend on the template the component was created with:
+  //   legacy (pre-FPTP): Irv=0, SequentialIrv=1, Stv=2
+  //   v2 (FPTP):         Irv=0, Fptp=1, SequentialIrv=2, Stv=3
   if (variant === 0) {
     return {
       kind: 'Irv',
@@ -471,7 +487,39 @@ function normalizeResult(result) {
       rounds: (payload?.[1] ?? []).map(normRound).filter(Boolean),
     };
   }
+  if (schema === 'legacy') {
+    if (variant === 1) {
+      return {
+        kind: 'SequentialIrv',
+        winners: (payload?.[0] ?? []).map(Number),
+        seats: (payload?.[1] ?? []).map((seat) => ({
+          winner: normOpt(seat?.[0]),
+          irv_rounds: (seat?.[1] ?? []).map(normRound).filter(Boolean),
+        })),
+      };
+    }
+    if (variant === 2) {
+      return {
+        kind: 'Stv',
+        winners: (payload?.[0] ?? []).map(Number),
+        rounds: (payload?.[1] ?? []).map((round) => ({
+          counts: normCounts(round?.[0]),
+          elected: (round?.[1] ?? []).map(Number),
+          eliminated: round?.[2] == null ? null : Number(round[2]),
+          quota: round?.[3] == null ? null : Number(round[3]),
+        })),
+      };
+    }
+    return null;
+  }
   if (variant === 1) {
+    return {
+      kind: 'Fptp',
+      winner: normOpt(payload?.[0]),
+      counts: normCounts(payload?.[1]),
+    };
+  }
+  if (variant === 2) {
     return {
       kind: 'SequentialIrv',
       winners: (payload?.[0] ?? []).map(Number),
@@ -481,7 +529,7 @@ function normalizeResult(result) {
       })),
     };
   }
-  if (variant === 2) {
+  if (variant === 3) {
     return {
       kind: 'Stv',
       winners: (payload?.[0] ?? []).map(Number),
@@ -501,14 +549,17 @@ function candidateName(id) {
   return c && Number(id) < c.length ? c[Number(id)] : `Candidate ${id}`;
 }
 
-function renderResult(result) {
+function renderResult(result, schema = 'v2') {
   const el = $('m-results');
   $('m-raw-pre').textContent = JSON.stringify(result, null, 2);
 
-  const r = normalizeResult(result);
+  const r = normalizeResult(result, schema);
   let html = '';
   if (!r) {
     html = '<p class="hint">Unrecognised result shape — see raw JSON below.</p>';
+  } else if (r.kind === 'Fptp') {
+    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
+    html += '<h4>First-preference counts</h4>' + fptpCountsTable(r.counts, r.winner);
   } else if (r.kind === 'Irv') {
     html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
     html += '<h4>Rounds</h4>' + roundsTable(r.rounds, r.winner != null);
@@ -523,6 +574,16 @@ function renderResult(result) {
     html += stvRoundsTable(r.rounds);
   }
   el.innerHTML = html;
+}
+
+function fptpCountsTable(counts, winner) {
+  const order = Object.keys(counts).map(Number).sort((a, b) => a - b);
+  let html = '<table class="round-table"><tr><th>Candidate</th><th>First-preference votes</th><th></th></tr>';
+  for (const c of order) {
+    const isWinner = winner != null && c === winner;
+    html += `<tr><td>${candidateName(c)}</td><td>${counts[c] ?? 0}</td><td class="${isWinner ? 'winner' : ''}">${isWinner ? 'winner' : ''}</td></tr>`;
+  }
+  return html + '</table>';
 }
 
 function roundsTable(rounds, hasWinner = true) {
@@ -635,6 +696,7 @@ document.querySelectorAll('.step summary').forEach((s) => {
 });
 
 // ---------- init ----------
+updateMethodHint();
 setDefaultDeadline();
 refreshStatus();
 setInterval(refreshStatus, 30000);

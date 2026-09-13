@@ -98,6 +98,7 @@ function publicElection(e) {
     voters: e.voters,
     expiresAtEpoch: e.expiresAtEpoch,
     expiresAtUtc: e.expiresAtUtc ?? null,
+    resultSchema: e.resultSchema ?? 'legacy',
     status: e.status,
     txId: e.txId,
   };
@@ -176,7 +177,7 @@ const server = createServer(async (req, res) => {
     if (req.method === 'POST' && p === '/api/elections') {
       const body = JSON.parse((await readBody(req)) || '{}');
       const title = String(body.title || 'Untitled election').slice(0, 200);
-      const tallyMethod = body.tallyMethod === 'stv' ? 'stv' : body.tallyMethod === 'sequential-irv' ? 'sequential-irv' : 'irv';
+      const tallyMethod = ['stv', 'sequential-irv', 'fptp'].includes(body.tallyMethod) ? body.tallyMethod : 'irv';
       const numWinners = Math.max(1, Math.min(100, Math.floor(Number(body.numWinners) || 1)));
       const numCandidates = Math.max(1, Math.min(50, Math.floor(Number(body.numCandidates) || 0)));
       const candidates = Array.isArray(body.candidates) ? body.candidates.map(String).slice(0, 50) : [];
@@ -195,6 +196,7 @@ const server = createServer(async (req, res) => {
       if (!cfg.TEMPLATE_ADDRESS) throw new Error('TEMPLATE_ADDRESS not configured');
       if (numCandidates < 2) throw new Error('at least 2 candidates required');
       if (numWinners > numCandidates) throw new Error('numWinners cannot exceed candidates');
+      if (tallyMethod === 'fptp' && numWinners !== 1) throw new Error('FPTP is single-winner (numWinners must be 1)');
       if (voterAddresses.length < 1) throw new Error('at least one voter address required');
       if (voterAddresses.length !== (Array.isArray(body.voters) ? body.voters.length : 0)) {
         throw new Error('invalid voter addresses (must be otl_esm_... ootle addresses)');
@@ -227,6 +229,7 @@ const server = createServer(async (req, res) => {
         expiresAtEpoch,
         expiresInEpochs,
         expiresAtUtc: epochToUtc(expiresAtEpoch, epoch),
+        resultSchema: 'v2',
         status: 'open',
         txId: initiated.txId,
         events: initiated.events,

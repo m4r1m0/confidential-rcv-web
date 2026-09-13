@@ -7,8 +7,10 @@ Node backend.
 
 ## What it does
 
-- **Create an election** — pick the tally method (IRV, Sequential IRV or STV),
-  set candidates/winners and a **voting deadline by calendar date/time (UTC)**,
+- **Create an election** — pick the tally method (IRV, Sequential IRV, STV or
+  **FPTP** — first past the post, a single-winner plurality count of first
+  preferences, which doubles as yes/no voting with two candidates), set
+  candidates/winners and a **voting deadline by calendar date/time (UTC)**,
   add voters by address (or bulk-import a CSV), and initiate on-chain. One
   stealth ballot token (amount-1) is minted per voter.
 - **Show each voter their ballot** — the per-voter UTXO commitment + sender
