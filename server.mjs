@@ -10,10 +10,13 @@ import { generateOotleSecretKey } from '@tari-project/ootle-wasm';
 import {
   currentEpoch,
   endVote,
+  finalizeInitiateElection,
   initiateElection,
   makeContext,
+  prepareInitiateElection,
   readElectionState,
   setupAccount,
+  verifyElectionCreation,
 } from './lib/chain.mjs';
 
 const ROOT = import.meta.dirname;
@@ -151,6 +154,11 @@ const server = createServer(async (req, res) => {
     if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/' || p === '/index.html')) return serveStatic(req, res, 'index.html');
     if ((req.method === 'GET' || req.method === 'HEAD') && p === '/app.js') return serveStatic(req, res, 'app.js');
     if ((req.method === 'GET' || req.method === 'HEAD') && p === '/style.css') return serveStatic(req, res, 'style.css');
+    // Separate, minimal-input voter page -- linked from the initiator console after an election is
+    // created, never requires typing a component/resource/commitment by hand (see vote.js).
+    if ((req.method === 'GET' || req.method === 'HEAD') && (p === '/vote' || p === '/vote.html')) return serveStatic(req, res, 'vote.html');
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/vote.js') return serveStatic(req, res, 'vote.js');
+    if ((req.method === 'GET' || req.method === 'HEAD') && p === '/wallet.js') return serveStatic(req, res, 'wallet.js');
 
     // status
     if (req.method === 'GET' && p === '/api/status') {
@@ -173,8 +181,8 @@ const server = createServer(async (req, res) => {
       return sendJson(res, 200, { txId: res2?.transaction_id ?? null, account: ctx.account });
     }
 
-    // create + initiate election
-    if (req.method === 'POST' && p === '/api/elections') {
+    // Shared parsing/validation for all three "create an election" entry points below.
+    if (req.method === 'POST' && (p === '/api/elections' || p === '/api/elections/prepare')) {
       const body = JSON.parse((await readBody(req)) || '{}');
       const title = String(body.title || 'Untitled election').slice(0, 200);
       const tallyMethod = ['stv', 'sequential-irv', 'fptp'].includes(body.tallyMethod) ? body.tallyMethod : 'irv';
@@ -201,38 +209,132 @@ const server = createServer(async (req, res) => {
       if (voterAddresses.length !== (Array.isArray(body.voters) ? body.voters.length : 0)) {
         throw new Error('invalid voter addresses (must be otl_esm_... ootle addresses)');
       }
+      if (voterAddresses.length > 5000) {
+        throw new Error('too many voters (max 5000)');
+      }
+      const parsed = { title, tallyMethod, numWinners, numCandidates, candidates, voterAddresses, epoch, expiresInEpochs, expiresAtEpoch };
 
-      const initiated = await initiateElection(ctx, cfg, {
-        voterAddresses,
-        numCandidates,
-        numWinners,
-        tallyMethod,
-        expiresAtEpoch,
-      });
+      // This server's own account signs and submits -- unchanged, still the simplest path for
+      // anyone happy to let the server hold a key.
+      if (p === '/api/elections') {
+        const initiated = await initiateElection(ctx, cfg, parsed);
+        const record = {
+          id: randomUUID(),
+          title,
+          createdAt: new Date().toISOString(),
+          componentAddress: initiated.componentAddress,
+          ballotResource: initiated.ballotResource,
+          templateAddress: cfg.TEMPLATE_ADDRESS,
+          tallyMethod,
+          numWinners,
+          numCandidates,
+          candidates,
+          // Deliberately never keeps the voter's address alongside the commitment: once the
+          // ballot is minted, this server has no further legitimate need for an
+          // address<->commitment mapping, and retaining one would be exactly the kind of
+          // centrally-held deanonymization risk a stealth ballot scheme exists to avoid. Voters
+          // find their own ballot later by connecting their own wallet and scanning the chain
+          // (see public/vote.js), never by asking this server "which one is mine."
+          voters: voterAddresses.map((_a, i) => ({
+            commitment: initiated.ballots[i].commitment,
+            nonce: initiated.ballots[i].nonce,
+          })),
+          expiresAtEpoch,
+          expiresInEpochs,
+          expiresAtUtc: epochToUtc(expiresAtEpoch, epoch),
+          resultSchema: 'v2',
+          status: 'open',
+          txId: initiated.txId,
+          events: initiated.events,
+        };
+        elections.push(record);
+        saveElections(elections);
+        return sendJson(res, 200, publicElection(record));
+      }
 
+      // /api/elections/prepare: build the unsigned instructions only. Building the mint
+      // statement needs no secret key (see chain.mjs's own comment), so this is safe to hand to
+      // whichever wallet the browser has connected -- see /api/elections/finalize below for the
+      // other half, once that wallet has signed and submitted them.
+      const prepared = await prepareInitiateElection(ctx, cfg, parsed);
+      return sendJson(res, 200, { instructions: prepared.instructions, ballots: prepared.ballots, maxFee: '2000000', draft: parsed });
+    }
+
+    // The initiator's own wallet (via window.tari) has already signed and submitted the
+    // instructions /api/elections/prepare returned; this reads the committed receipt back and
+    // stores the election record, exactly like /api/elections does for the server's own account.
+    if (req.method === 'POST' && p === '/api/elections/finalize') {
+      const body = JSON.parse((await readBody(req)) || '{}');
+      const { transactionId, draft, ballots } = body;
+      if (!transactionId) throw new Error('transactionId is required');
+      if (!draft || !Array.isArray(ballots)) throw new Error('draft and ballots (from /api/elections/prepare) are required');
+      if (!cfg.TEMPLATE_ADDRESS) throw new Error('TEMPLATE_ADDRESS not configured');
+      // The client could have tampered with the draft between /prepare and /finalize, so
+      // re-validate it here rather than trusting the round-trip.
+      const draftVoters = Array.isArray(draft.voterAddresses) ? draft.voterAddresses.map((v) => String(v).trim()) : [];
+      const validated = {
+        title: String(draft.title || 'Untitled election').slice(0, 200),
+        tallyMethod: ['stv', 'sequential-irv', 'fptp'].includes(draft.tallyMethod) ? draft.tallyMethod : null,
+        numWinners: Math.floor(Number(draft.numWinners) || 0),
+        numCandidates: Math.floor(Number(draft.numCandidates) || 0),
+        candidates: Array.isArray(draft.candidates) ? draft.candidates.map(String).slice(0, 50) : [],
+        voterAddresses: draftVoters.filter((v) => /^otl_esm_/.test(v)),
+        expiresInEpochs: Math.floor(Number(draft.expiresInEpochs) || 0),
+        expiresAtEpoch: Math.floor(Number(draft.expiresAtEpoch) || 0),
+        epoch: Math.floor(Number(draft.epoch) || 0),
+      };
+      if (!validated.tallyMethod) throw new Error('invalid draft tally method');
+      if (validated.numCandidates < 2) throw new Error('invalid draft: at least 2 candidates required');
+      if (validated.numWinners < 1 || validated.numWinners > validated.numCandidates) {
+        throw new Error('invalid draft: numWinners out of range');
+      }
+      if (validated.tallyMethod === 'fptp' && validated.numWinners !== 1) {
+        throw new Error('invalid draft: FPTP is single-winner');
+      }
+      if (validated.voterAddresses.length < 1 || validated.voterAddresses.length > 5000) {
+        throw new Error('invalid draft: voter count out of range');
+      }
+      if (validated.voterAddresses.length !== draftVoters.length) {
+        throw new Error('invalid draft: bad voter addresses');
+      }
+      if (!validated.expiresAtEpoch || !validated.epoch) throw new Error('invalid draft: expiry missing');
+      // finalizeInitiateElection() first, not verifyElectionCreation() -- the wallet has *just*
+      // submitted this transaction, and only finalizeInitiateElection() actually waits for it to
+      // land (watchTransaction, up to 180s). verifyElectionCreation()'s getTransaction() call has
+      // no wait/retry of its own: called first, it raced the indexer and threw "does not call
+      // new() on the configured template" (instructions come back empty) whenever the indexer
+      // hadn't caught up yet -- a false verification failure, not a real mismatch. Once
+      // finalizeInitiateElection() returns, the transaction is guaranteed committed and indexed,
+      // so verifyElectionCreation() reading the same transactionId right after is safe.
+      const finalized = await finalizeInitiateElection(ctx, transactionId);
+      await verifyElectionCreation(ctx, cfg, transactionId, validated, ballots);
+      if (elections.some((e) => e.componentAddress === finalized.componentAddress)) {
+        throw new Error('election already recorded');
+      }
       const record = {
         id: randomUUID(),
-        title,
+        title: validated.title,
         createdAt: new Date().toISOString(),
-        componentAddress: initiated.componentAddress,
-        ballotResource: initiated.ballotResource,
+        componentAddress: finalized.componentAddress,
+        ballotResource: finalized.ballotResource,
         templateAddress: cfg.TEMPLATE_ADDRESS,
-        tallyMethod,
-        numWinners,
-        numCandidates,
-        candidates,
-        voters: voterAddresses.map((a, i) => ({
-          address: a,
-          commitment: initiated.ballots[i].commitment,
-          nonce: initiated.ballots[i].nonce,
+        tallyMethod: validated.tallyMethod,
+        numWinners: validated.numWinners,
+        numCandidates: validated.numCandidates,
+        candidates: validated.candidates,
+        // See the identical comment in the /api/elections branch above -- no address is stored
+        // here either, for the same reason.
+        voters: validated.voterAddresses.map((_a, i) => ({
+          commitment: ballots[i].commitment,
+          nonce: ballots[i].nonce,
         })),
-        expiresAtEpoch,
-        expiresInEpochs,
-        expiresAtUtc: epochToUtc(expiresAtEpoch, epoch),
+        expiresAtEpoch: validated.expiresAtEpoch,
+        expiresInEpochs: validated.expiresInEpochs,
+        expiresAtUtc: epochToUtc(validated.expiresAtEpoch, validated.epoch),
         resultSchema: 'v2',
         status: 'open',
-        txId: initiated.txId,
-        events: initiated.events,
+        txId: finalized.txId,
+        events: finalized.events,
       };
       elections.push(record);
       saveElections(elections);

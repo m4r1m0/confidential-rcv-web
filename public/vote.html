@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Cast Your Ballot — Confidential Ranked-Choice Voting</title>
+  <link rel="stylesheet" href="/style.css" />
+  <!-- Provides window.tari when this page is opened inside Tari Universe's own dApp browser (an
+       iframe, not an ordinary tab) -- a no-op when an extension like Sapient already owns
+       window.tari. See https://universe.tari.mw/integration. -->
+  <script src="https://universe.tari.mw/tari-connector.js"></script>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <h1>Cast Your Ballot</h1>
+      <p class="sub">Tari Ootle · stealth ballot · nobody can link this vote to your wallet</p>
+    </div>
+  </header>
+
+  <main>
+    <p class="hint" style="margin: 0 0 16px;">
+      This casts your ballot from your <strong>own</strong> wallet — this site never sees your keys.
+      Connect a <a href="https://sapient.tari.mw" target="_blank" rel="noopener">Sapient</a> or
+      <a href="https://universe.tari.mw" target="_blank" rel="noopener">Tari Universe</a> wallet below.
+    </p>
+
+    <section class="elections-bar">
+      <span class="hint">Here to run an election, not vote?</span>
+      <a href="/" class="ghost">Go to the initiator console →</a>
+    </section>
+
+    <!-- Election picker: only shown if no ?election= id was in the link you were given -->
+    <section class="elections-bar" id="election-picker" hidden>
+      <label for="election-select">Election</label>
+      <select id="election-select"><option value="">— choose —</option></select>
+    </section>
+
+    <div id="v-not-found" class="error" hidden>Election not found. Check the link you were given.</div>
+
+    <details class="step" id="step-vote" open>
+      <summary><span class="step-num">🗳</span> <span id="v-title">Ballot</span></summary>
+      <div class="step-body">
+        <div class="row">
+          <button id="btn-vote-connect" class="ghost">Connect wallet</button>
+          <span class="hint" id="v-account"></span>
+        </div>
+
+        <div class="row" id="v-scan-row" hidden>
+          <button id="btn-vote-scan" class="ghost">Scan for my ballot</button>
+          <span class="hint" id="v-scan-status"></span>
+        </div>
+        <div id="v-not-eligible" class="error" hidden>
+          No ballot for this election's ballot resource was found in your wallet.
+        </div>
+
+        <div id="v-ballot-fields" hidden>
+          <div class="field">
+            <label>Rank the candidates</label>
+            <p class="hint">Use the arrows to reorder. Top is your 1st choice.</p>
+            <ol id="v-rank-list" class="rank-list"></ol>
+          </div>
+
+          <div class="field">
+            <label for="v-fee-commitment">Fee — always paid privately</label>
+            <p class="hint">
+              The transaction fee is paid from a separate stealth XTR UTXO, never from your ordinary
+              balance — paying it any other way would link this transaction (including your ranking)
+              to your wallet address on-chain, defeating the point of a stealth ballot. Checked
+              automatically against your wallet's existing private balance; shield some XTR below if
+              you don't have any yet.
+            </p>
+            <input id="v-fee-commitment" type="text" placeholder="hex… — checked automatically" spellcheck="false" />
+            <div class="row">
+              <button id="btn-vote-shield-fee" class="ghost">Shield XTR for fees</button>
+              <span class="hint" id="v-fee-status"></span>
+            </div>
+          </div>
+
+          <button id="btn-vote-cast" class="primary" disabled>Cast ballot</button>
+        </div>
+
+        <div id="v-progress" class="progress" hidden></div>
+        <div id="v-error" class="error" hidden></div>
+        <div id="v-result" hidden>
+          <h3>Ballot cast ✓</h3>
+          <div class="kv">
+            <div><span>Transaction</span><code id="v-txid"></code></div>
+          </div>
+        </div>
+      </div>
+    </details>
+  </main>
+
+  <footer>
+    <p>Everything runs on-chain on the Esmeralda testnet. Voter identity is hidden by stealth ballots; ballot contents and the tally are public.</p>
+  </footer>
+
+  <script src="/wallet.js"></script>
+  <script src="/vote.js"></script>
+</body>
+</html>

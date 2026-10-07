@@ -114,14 +114,43 @@ one-time stealth key — the transaction cannot be linked to the voter.
 |---|---|
 | `GET /api/status` | Network, epoch, template, initiator account |
 | `POST /api/setup` | Create initiator account + faucet (idempotent) |
-| `POST /api/elections` | Create + initiate an election (`endUtc` ISO deadline or `expiresInEpochs`) |
+| `POST /api/elections` | Create + initiate an election with the server's account (`endUtc` ISO deadline or `expiresInEpochs`) |
+| `POST /api/elections/prepare` | Build the unsigned `new()` instructions + mint statement for the initiator's own wallet to sign |
+| `POST /api/elections/finalize` | Record an election after a connected wallet signed/submitted a prepared creation (verifies the tx on-chain) |
 | `GET /api/elections` | List elections |
 | `GET /api/elections/:id` | Election record + live chain state |
 | `POST /api/elections/:id/end` | End the vote (initiator) |
 | `POST /api/elections/:id/end-expired` | Finalize after the deadline (anyone) |
 
+## Voting page (`/vote`) and non-custodial creation
+
+The initiator console offers two ways to create an election: the **server's account**
+(default, unchanged) or **your own wallet**. The wallet path splits creation into
+`/api/elections/prepare` (the server builds the unsigned transaction — building the mint
+statement needs no secret key) → the connected wallet signs and submits → `/api/elections/finalize`
+(the server verifies the committed transaction on-chain before storing the record).
+
+Voters use the **voting page** (`/vote?election=…`, linked after creation): a connected wallet
+scans the election's ballot resource for the voter's own ballot UTXO (eligibility is decided
+on-chain — whether the wallet can decrypt a ballot), and casts with the transaction fee paid
+from a stealth XTR UTXO so the vote stays unlinkable.
+
+**Wallet requirement:** the wallet paths need `window.tari`, provided by the **Tari Wallet
+browser extension** (open source: `tari-project/tari-wallet`) or by opening the site inside
+**Tari Universe's** dApp browser. A `tari-connector.js` script is loaded from
+`universe.tari.mw` for the embedded (Universe) case — it is plain readable JavaScript served
+from Tari's own origin, currently without SRI. Without a wallet, election creation still works
+via the server-key path, and voters can always cast with `scripts/cast-ballot.mjs` (fully
+in-repo, no external dependencies).
+
+The wallet-signed creation and the voting page are currently considered **experimental** —
+they are implemented against the wallet API contract but have not yet been exercised with a
+real wallet end-to-end.
+
 ## Security notes
 
 - The initiator's private keys live only in `config.env` (gitignored).
 - No voter keys ever pass through the server.
+- The server does not persist or serve the address↔ballot mapping; voter addresses are only
+  processed once, while building the mint statement.
 - The tally is computed on-chain by the template — this site only displays it.

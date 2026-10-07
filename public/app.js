@@ -2,6 +2,7 @@
 // Talks only to the same-origin backend API.
 
 const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 const state = {
   currentElection: null,
   status: null,
@@ -255,14 +256,14 @@ function renderSummary() {
     ['Title', state.status?.network || '…'],
     ['Voting method', $('in-method').selectedOptions[0].textContent],
     ['Winners', $('in-winners').value],
-    ['Candidates', state.candidates.length ? state.candidates.map((c, i) => `#${i} ${c}`).join('<br>') : '—'],
+    ['Candidates', state.candidates.length ? state.candidates.map((c, i) => esc(`#${i} ${c}`)).join('<br>') : '—'],
     ['Voters', `${state.voters.length} address(es)`],
     ['Voting deadline (UTC)', deadlineSummary()],
   ];
   rows[0][1] = $('in-title').value || '(untitled)';
   for (const [k, v] of rows) {
     const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${k}</td><td>${v}</td>`;
+    tr.innerHTML = `<td>${esc(k)}</td><td>${v}</td>`;
     t.appendChild(tr);
   }
 }
@@ -297,6 +298,53 @@ function validateSetup() {
   return { winners, endUtc };
 }
 
+// ---------- optional: sign election creation with the initiator's own wallet ----------
+let initiatorAccount = null;
+
+document.querySelectorAll('input[name="init-signer"]').forEach((el) =>
+  el.addEventListener('change', () => {
+    const useWallet = $('init-signer-wallet').checked;
+    $('init-wallet-row').hidden = !useWallet;
+    $('init-signer-hint').textContent = useWallet
+      ? "Your wallet pays the fee and is recorded as this election's initiator (only the initiator can end the vote early) — this server never sees your keys."
+      : "The server's own account pays the fee and is recorded as this election's initiator — simplest, no wallet needed.";
+  }),
+);
+
+$('btn-init-connect').addEventListener('click', async () => {
+  if (!window.tari) {
+    log('No Tari wallet found — install Sapient or open this page from inside Tari Universe.', 'err');
+    return;
+  }
+  try {
+    const [account] = await window.tari.request({ method: 'tari_requestAccounts' });
+    initiatorAccount = account;
+    $('init-wallet-account').textContent = `connected: ${account.slice(0, 14)}…${account.slice(-8)}`;
+  } catch (e) {
+    log(`wallet connect failed: ${e?.message || e}`, 'err');
+  }
+});
+
+// The create -> poll -> submit helper lives in wallet.js (shared with the voting page).
+
+// A `kind: "instructions"` result is the *raw* indexer response (just `{ result: {...} }`, no
+// top-level id at all) -- unlike the custom stealth-redemption kinds, which return a convenient
+// `{ transactionId }` directly. Dig the hash out of the one place it actually lives.
+function extractTransactionId(result) {
+  return result?.transactionId ?? result?.result?.Finalized?.execution_result?.finalize?.transaction_hash ?? null;
+}
+
+function showElectionResult(e) {
+  state.currentElection = e;
+  $('init-result').hidden = false;
+  $('res-component').textContent = e.componentAddress;
+  $('res-resource').textContent = e.ballotResource;
+  $('res-txid').textContent = e.txId || '—';
+  $('res-vote-link').value = `${location.origin}/vote?election=${e.id}`;
+  renderBallotTable(e);
+  loadElectionOptions();
+}
+
 $('btn-initiate').addEventListener('click', async () => {
   let opts;
   try {
@@ -306,33 +354,51 @@ $('btn-initiate').addEventListener('click', async () => {
     alert(e.message);
     return;
   }
+  const useWallet = $('init-signer-wallet').checked;
+  if (useWallet && !initiatorAccount) {
+    alert('Connect your wallet first.');
+    return;
+  }
+
   $('btn-initiate').disabled = true;
   $('init-progress').hidden = false;
-  $('init-progress').textContent = 'submitting — minting stealth ballots, creating component…';
+  const body = {
+    title: $('in-title').value.trim(),
+    tallyMethod: $('in-method').value,
+    numWinners: opts.winners,
+    numCandidates: state.candidates.length,
+    candidates: state.candidates,
+    voters: state.voters,
+    endUtc: opts.endUtc,
+  };
   try {
-    const body = {
-      title: $('in-title').value.trim(),
-      tallyMethod: $('in-method').value,
-      numWinners: opts.winners,
-      numCandidates: state.candidates.length,
-      candidates: state.candidates,
-      voters: state.voters,
-      endUtc: opts.endUtc,
-    };
-    const e = await api('/api/elections', { method: 'POST', body });
-    log(`election created: <code>${e.componentAddress}</code>`);
-    state.currentElection = e;
-    $('init-result').hidden = false;
-    $('res-component').textContent = e.componentAddress;
-    $('res-resource').textContent = e.ballotResource;
-    $('res-txid').textContent = e.txId || '—';
-    renderBallotTable(e);
-    loadElectionOptions();
+    if (useWallet) {
+      $('init-progress').textContent = 'preparing the transaction…';
+      const prep = await api('/api/elections/prepare', { method: 'POST', body });
+      $('init-progress').textContent = 'waiting for wallet approval…';
+      const result = await window.RcvWallet.submitTransactionRequest({ kind: 'instructions', instructions: prep.instructions, maxFee: prep.maxFee });
+      const transactionId = extractTransactionId(result);
+      if (!transactionId) throw new Error(`Wallet accepted the transaction but returned no transaction id: ${JSON.stringify(result).slice(0, 300)}`);
+      $('init-progress').textContent = 'confirming on-chain…';
+      const e = await api('/api/elections/finalize', {
+        method: 'POST',
+        body: { transactionId, draft: prep.draft, ballots: prep.ballots },
+      });
+      log(`election created via wallet: <code>${e.componentAddress}</code>`);
+      showElectionResult(e);
+    } else {
+      $('init-progress').textContent = 'submitting — minting stealth ballots, creating component…';
+      const e = await api('/api/elections', { method: 'POST', body });
+      log(`election created: <code>${e.componentAddress}</code>`);
+      showElectionResult(e);
+    }
     openStep('step-monitor');
-    await loadElection(e.id);
+    await loadElection(state.currentElection.id);
   } catch (err) {
-    $('init-progress').textContent = '';
-    $('init-progress').hidden = true;
+    // Was hiding the element and *then* writing the failure text into it -- the progress line
+    // just silently disappeared on any failure (e.g. mid "confirming on-chain…"), with nothing
+    // visible to say what happened unless you happened to have the log panel open.
+    $('init-progress').hidden = false;
     $('init-progress').textContent = `failed: ${err.message}`;
     log(`initiate failed: ${err.message}`, 'err');
   } finally {
@@ -340,14 +406,16 @@ $('btn-initiate').addEventListener('click', async () => {
   }
 });
 
+// No voter address column -- the server never stores or serves one (see server.mjs). A voter
+// finds their own ballot by connecting their wallet on the voting page and scanning the chain,
+// not by looking up their address in a table this server keeps.
 function renderBallotTable(e) {
   const t = $('ballot-table');
-  t.innerHTML = '<tr><th>#</th><th>Voter address</th><th>Ballot commitment</th><th>Sender nonce</th></tr>';
+  t.innerHTML = '<tr><th>#</th><th>Ballot commitment</th><th>Sender nonce</th></tr>';
   e.voters.forEach((v, i) => {
     const tr = document.createElement('tr');
     tr.innerHTML = `
       <td>${i}</td>
-      <td><code>${v.address}</code></td>
       <td><code>${v.commitment}</code> <button class="copy" data-copy="${v.commitment}" title="copy">⧉</button></td>
       <td><code>${v.nonce}</code> <button class="copy" data-copy="${v.nonce}" title="copy">⧉</button></td>`;
     t.appendChild(tr);
@@ -357,12 +425,18 @@ function renderBallotTable(e) {
   );
 }
 
+$('btn-copy-vote-link').addEventListener('click', async () => {
+  const ok = await navigator.clipboard?.writeText($('res-vote-link').value).then(() => true, () => false);
+  $('btn-copy-vote-link').textContent = ok ? 'Copied ✓' : 'Copy failed';
+  setTimeout(() => ($('btn-copy-vote-link').textContent = 'Copy link'), 1500);
+});
+
 $('btn-ballots-csv').addEventListener('click', () => {
   const e = state.currentElection;
   if (!e) return;
-  const lines = ['index,address,ballot_commitment,sender_nonce'];
+  const lines = ['index,ballot_commitment,sender_nonce'];
   e.voters.forEach((v, i) => {
-    lines.push(`${i},${v.address},${v.commitment},${v.nonce}`);
+    lines.push(`${i},${v.commitment},${v.nonce}`);
   });
   const blob = new Blob([lines.join('\n')], { type: 'text/csv' });
   const a = document.createElement('a');
@@ -549,6 +623,10 @@ function candidateName(id) {
   return c && Number(id) < c.length ? c[Number(id)] : `Candidate ${id}`;
 }
 
+// Candidate names are user-supplied (election creator's own input) but still end up in
+// innerHTML-driven tables; escape every place they are interpolated.
+const candidateNameEsc = (id) => esc(candidateName(id));
+
 function renderResult(result, schema = 'v2') {
   const el = $('m-results');
   $('m-raw-pre').textContent = JSON.stringify(result, null, 2);
@@ -558,19 +636,19 @@ function renderResult(result, schema = 'v2') {
   if (!r) {
     html = '<p class="hint">Unrecognised result shape — see raw JSON below.</p>';
   } else if (r.kind === 'Fptp') {
-    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
+    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateNameEsc(r.winner) : 'no winner'}</p>`;
     html += '<h4>First-preference counts</h4>' + fptpCountsTable(r.counts, r.winner);
   } else if (r.kind === 'Irv') {
-    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateName(r.winner) : 'no winner'}</p>`;
+    html = `<h4>Winner</h4><p class="winner">${r.winner != null ? candidateNameEsc(r.winner) : 'no winner'}</p>`;
     html += '<h4>Rounds</h4>' + roundsTable(r.rounds, r.winner != null);
   } else if (r.kind === 'SequentialIrv') {
-    html = `<h4>Winners</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
+    html = `<h4>Winners</h4><p class="winner">${r.winners.length ? r.winners.map(candidateNameEsc).join(', ') : 'none'}</p>`;
     r.seats.forEach((seat, i) => {
-      html += `<h4>Seat ${i + 1}${seat.winner != null ? ' — winner ' + candidateName(seat.winner) : ''}</h4>`;
+      html += `<h4>Seat ${i + 1}${seat.winner != null ? ' — winner ' + candidateNameEsc(seat.winner) : ''}</h4>`;
       html += roundsTable(seat.irv_rounds, seat.winner != null);
     });
   } else if (r.kind === 'Stv') {
-    html = `<h4>Winners (elected in order)</h4><p class="winner">${r.winners.length ? r.winners.map(candidateName).join(', ') : 'none'}</p>`;
+    html = `<h4>Winners (elected in order)</h4><p class="winner">${r.winners.length ? r.winners.map(candidateNameEsc).join(', ') : 'none'}</p>`;
     html += stvRoundsTable(r.rounds);
   }
   el.innerHTML = html;
@@ -581,7 +659,7 @@ function fptpCountsTable(counts, winner) {
   let html = '<table class="round-table"><tr><th>Candidate</th><th>First-preference votes</th><th></th></tr>';
   for (const c of order) {
     const isWinner = winner != null && c === winner;
-    html += `<tr><td>${candidateName(c)}</td><td>${counts[c] ?? 0}</td><td class="${isWinner ? 'winner' : ''}">${isWinner ? 'winner' : ''}</td></tr>`;
+    html += `<tr><td>${candidateNameEsc(c)}</td><td>${counts[c] ?? 0}</td><td class="${isWinner ? 'winner' : ''}">${isWinner ? 'winner' : ''}</td></tr>`;
   }
   return html + '</table>';
 }
@@ -592,7 +670,7 @@ function roundsTable(rounds, hasWinner = true) {
   for (const r of rounds) Object.keys(normCounts(r.counts)).forEach((c) => cands.add(Number(c)));
   const order = [...cands].sort((a, b) => a - b);
   let html = '<table class="round-table"><tr><th>Round</th>';
-  for (const c of order) html += `<th>${candidateName(c)}</th>`;
+  for (const c of order) html += `<th>${candidateNameEsc(c)}</th>`;
   html += '<th>Action</th></tr>';
   rounds.forEach((r, i) => {
     const counts = normCounts(r.counts);
@@ -603,7 +681,7 @@ function roundsTable(rounds, hasWinner = true) {
     const final = r.eliminated == null;
     const action = final
       ? hasWinner ? 'winner' : 'no winner'
-      : `eliminated ${candidateName(r.eliminated)}`;
+      : `eliminated ${candidateNameEsc(r.eliminated)}`;
     const cls = final ? (hasWinner ? 'winner' : '') : 'elim';
     html += `<td class="${cls}">${action}</td></tr>`;
   });
@@ -616,15 +694,15 @@ function stvRoundsTable(rounds) {
   for (const r of rounds) Object.keys(normCounts(r.counts)).forEach((c) => cands.add(Number(c)));
   const order = [...cands].sort((a, b) => a - b);
   let html = '<table class="round-table"><tr><th>Round</th>';
-  for (const c of order) html += `<th>${candidateName(c)}</th>`;
+  for (const c of order) html += `<th>${candidateNameEsc(c)}</th>`;
   html += '<th>Action</th></tr>';
   rounds.forEach((r, i) => {
     const counts = normCounts(r.counts);
     html += `<tr><td>${i + 1}</td>`;
     for (const c of order) html += `<td>${counts[c] ?? '·'}</td>`;
     const acts = [];
-    if (r.elected?.length) acts.push(`elected ${r.elected.map(candidateName).join(', ')}`);
-    if (r.eliminated != null) acts.push(`eliminated ${candidateName(r.eliminated)}`);
+    if (r.elected?.length) acts.push(`elected ${r.elected.map(candidateNameEsc).join(', ')}`);
+    if (r.eliminated != null) acts.push(`eliminated ${candidateNameEsc(r.eliminated)}`);
     if (!acts.length) acts.push('—');
     html += `<td>${acts.join('; ')}</td></tr>`;
   });

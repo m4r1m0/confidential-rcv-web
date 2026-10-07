@@ -5,6 +5,10 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Confidential Ranked-Choice Voting — Tari Ootle</title>
   <link rel="stylesheet" href="/style.css" />
+  <!-- Provides window.tari when this page is opened inside Tari Universe's own dApp browser (an
+       iframe, not an ordinary tab) -- a no-op when an extension like Sapient already owns
+       window.tari. See https://universe.tari.mw/integration. -->
+  <script src="https://universe.tari.mw/tari-connector.js"></script>
 </head>
 <body>
   <header>
@@ -21,6 +25,11 @@
   </header>
 
   <main>
+    <section class="elections-bar">
+      <span class="hint">Here to cast a ballot, not run an election?</span>
+      <a href="/vote" class="ghost">Go to the voting page →</a>
+    </section>
+
     <section class="elections-bar">
       <label for="election-select">Load election</label>
       <select id="election-select"><option value="">— none —</option></select>
@@ -89,6 +98,20 @@
       <summary><span class="step-num">3</span> Review &amp; initiate</summary>
       <div class="step-body">
         <table class="summary" id="init-summary"></table>
+        <div class="field">
+          <label>Who signs this?</label>
+          <div class="row">
+            <label><input type="radio" name="init-signer" id="init-signer-server" value="server" checked /> This server's account</label>
+            <label><input type="radio" name="init-signer" id="init-signer-wallet" value="wallet" /> My own wallet (Sapient / Tari Universe)</label>
+          </div>
+          <p class="hint" id="init-signer-hint">
+            The server's own account pays the fee and is recorded as this election's initiator — simplest, no wallet needed.
+          </p>
+          <div class="row" id="init-wallet-row" hidden>
+            <button id="btn-init-connect" class="ghost">Connect wallet</button>
+            <span class="hint" id="init-wallet-account"></span>
+          </div>
+        </div>
         <button id="btn-initiate" class="primary">Initiate election</button>
         <div id="init-progress" class="progress" hidden></div>
         <div id="init-result" hidden>
@@ -98,8 +121,24 @@
             <div><span>Ballot resource</span><code id="res-resource"></code></div>
             <div><span>Transaction</span><code id="res-txid"></code></div>
           </div>
-          <h3>Ballot tokens (per voter)</h3>
-          <p class="hint">Give each voter their row — they need the commitment and nonce to spend their token from their own wallet client.</p>
+          <h3>Send voters this link</h3>
+          <p class="hint">
+            One link works for every voter — the voting page looks up each connected wallet's own
+            ballot automatically, nothing to fill in by hand.
+          </p>
+          <div class="row">
+            <input id="res-vote-link" type="text" readonly style="flex: 1; min-width: 240px;" />
+            <button id="btn-copy-vote-link" class="ghost">Copy link</button>
+          </div>
+          <h3>Ballot commitments minted</h3>
+          <p class="hint">
+            <strong>This server does not store or serve the address↔ballot mapping</strong> — it
+            only processes the voter addresses once, while building the mint statement, and keeps
+            just the commitments below with no address attached. Voters find their own ballot by
+            connecting their wallet on the voting page and scanning the chain, never by asking this
+            server "which one is mine." This table is just a record of what was minted, for your own
+            bookkeeping.
+          </p>
           <table class="ballots" id="ballot-table"></table>
           <button id="btn-ballots-csv" class="ghost">Download ballots CSV</button>
         </div>
@@ -169,6 +208,7 @@
     <p>Everything runs on-chain on the Esmeralda testnet. Voter identity is hidden by stealth ballots; ballot contents and the tally are public.</p>
   </footer>
 
+  <script src="/wallet.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
